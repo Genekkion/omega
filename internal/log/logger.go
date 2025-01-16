@@ -6,95 +6,53 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
 )
 
 var (
-	loggers = []xLogger{
-		newDefault(os.Stdout),
+	loggers = []Logger{
+		new(os.Stdout),
 	}
-
-	style = newStyles()
 )
 
 const TAG = "OMEGA::"
 
-type xLogger struct {
+type Logger struct {
 	*log.Logger
-	source *os.File
+	deconstructor func() error
 }
 
-func newStyles() *log.Styles {
-	styles := log.DefaultStyles()
-
-	style := lipgloss.NewStyle().
-		Bold(true).
-		Padding(0, 1, 0, 1)
-
-	styles.Levels[log.DebugLevel] = style.
-		SetString(TAG + "D").
-		Background(lipgloss.Color("#414868")).
-		Foreground(lipgloss.Color("#FFFFFF"))
-
-	styles.Levels[log.InfoLevel] = style.
-		SetString(TAG + "I").
-		Background(lipgloss.Color("#485E30")).
-		Foreground(lipgloss.Color("#FFFFFF"))
-
-	styles.Levels[log.WarnLevel] = style.
-		SetString(TAG + "W").
-		Background(lipgloss.Color("#FF9E64")).
-		Foreground(lipgloss.Color("#000000"))
-
-	styles.Levels[log.ErrorLevel] = style.
-		SetString(TAG + "E").
-		Background(lipgloss.Color("#F7768E")).
-		Foreground(lipgloss.Color("#000000"))
-
-	styles.Levels[log.FatalLevel] = style.
-		SetString(TAG + "F").
-		Background(lipgloss.Color("#BB9AF7")).
-		Foreground(lipgloss.Color("#000000"))
-
-	return styles
-
-}
-
-func new(w io.Writer) *log.Logger {
-	logger := log.NewWithOptions(w, log.Options{
+func new(w io.Writer) Logger {
+	l := log.NewWithOptions(w, log.Options{
 		ReportTimestamp: true,
 		Level:           log.DebugLevel,
 	})
-	logger.SetStyles(style)
-	return logger
+	l.SetStyles(defaultStyle)
+	return Logger{Logger: l}
 }
 
-func newDefault(w io.Writer) xLogger {
-	return xLogger{
-		Logger: new(w),
-		source: nil,
-	}
+func newWithDec(w io.Writer, deconstructor func() error) Logger {
+	l := new(w)
+	l.deconstructor = deconstructor
+	return l
 }
 
-func InitFileLogger(filePath string) error {
-	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+// Assumes file checks occurred at a higher level
+func NewFromFile(path string) error {
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
 
-	loggers = append(loggers, xLogger{
-		Logger: new(file),
-		source: file,
-	})
+	loggers = append(loggers, newWithDec(file, file.Close))
 	return nil
 }
 
 func CloseAll() []error {
 	errors := make([]error, 0, len(loggers))
 	for _, l := range loggers {
-		if l.source != nil {
-			err := l.source.Close()
+		if l.deconstructor != nil {
+			err := l.deconstructor()
 			if err != nil {
 				errors = append(errors, err)
 			}
@@ -114,7 +72,7 @@ func SetLogLevel(str string) {
 		l.SetLevel(level)
 	}
 
-	switch strings.ToLower(str) {
+	switch strings.ToLower(strings.TrimSpace(str)) {
 	case "debug":
 		log.SetLevel(log.DebugLevel)
 	case "info":

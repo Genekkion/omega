@@ -2,15 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
-	"io/fs"
-	"omega/internal/env"
-	"omega/internal/forms"
 	"omega/internal/log"
 	"omega/internal/program"
-	"omega/internal/runner"
-	"omega/internal/structs"
-	"omega/internal/watcher"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,40 +12,18 @@ import (
 )
 
 func main() {
-	// First, attempt to load the config
-	config, err := structs.ConfigFromFile(env.ConfigPath)
+	c, err := program.Setup()
 	if err != nil {
-
-		// File exists, but cannot seem to load for some reason
-		if !errors.Is(err, fs.ErrNotExist) {
-			log.Fatal("Error occured loading "+env.ConfigPath, "error", err)
-		}
-
-		if !forms.FormGenerateConfig() {
-			// Does not want to create config
-			// NOTE:: omega does not run without the config file
-			log.Info("Alright see ya later 🐊!")
-			return
-		}
-
-		l := forms.FormSelectLanguage()
-
-		program.SetupLanguage(l)
-
-		config, err = structs.ConfigFromFile(env.ConfigPath)
-		if err != nil {
-			log.Fatal("Something went wrong reading the config file", "error", err)
-		}
-		return
+		log.Fatal(err)
 	}
 
 	// Config parsed, check validity
-	if len(config.Commands) == 0 {
-		log.Fatal("No commands specified! Please specify them under the \"commands\" field in omega.json")
+	if len(c.Commands) == 0 {
+		log.Warn("No commands specified! Please specify them under the \"commands\" field in omega.json")
 	}
 
 	log.SetLogLevel("error")
-	for _, logFile := range config.LogFiles {
+	for _, logFile := range c.LogFiles {
 		dir := filepath.Dir(logFile)
 		if dir != "." {
 			err = os.MkdirAll(dir, 0755)
@@ -61,45 +32,49 @@ func main() {
 				continue
 			}
 		}
-		config.Ignore = append(config.Ignore, logFile)
+		c.Ignore = append(c.Ignore, logFile)
 		if filepath.Base(logFile) == logFile {
-			config.Ignore = append(config.Ignore, "./"+logFile)
+			c.Ignore = append(c.Ignore, "./"+logFile)
 		}
-		err = log.InitFileLogger(logFile)
+		err = log.NewFromFile(logFile)
 		if err != nil {
 			log.Warn("Unable to create specified file logger, skipping", "file", logFile, "error", err)
 		}
 	}
-	log.SetLogLevel(config.LogLevel)
+	log.SetLogLevel(c.LogLevel)
 	defer log.CloseAll()
 
-	runnerChannel := make(chan struct{}, 1)
-	watcherWorker, err := watcher.New(*config, runnerChannel)
+	workerCh := make(chan struct{}, 1)
+	watcher, err := program.NewWatcher(*c, workerCh)
 	if err != nil {
 		log.Fatal("Error occured creating watcher worker", "error", err)
 	}
 
-	runnerWorker := runner.NewRunner(*config, runnerChannel)
+	runner := program.NewRunner(*c, workerCh)
 
-	osChannel := make(chan os.Signal, 1)
-	signal.Notify(osChannel, syscall.SIGTERM, syscall.SIGINT)
+	osCh := make(chan os.Signal, 1)
+	signal.Notify(osCh, syscall.SIGTERM, syscall.SIGINT)
 
-	doneChannel := make(chan error, 2)
-	waitGroup := sync.WaitGroup{}
-	waitGroup.Add(2)
+	doneCh := make(chan error, 2)
+	wg := sync.WaitGroup{}
+	wg.Add(2)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
-		doneChannel <- watcherWorker.Run(ctx)
-		waitGroup.Done()
+		doneCh <- watcher.Start(ctx)
+		wg.Done()
 	}()
 
 	go func() {
-		doneChannel <- runnerWorker.Run(ctx)
-		waitGroup.Done()
+		doneCh <- runner.Start(ctx)
+		wg.Done()
 	}()
-
-	log.Info("Received OS signal to shutdown", "signal", <-osChannel)
+	select {
+	case err = <-doneCh:
+		log.Error("Error occurred by one of the workers", "error", err)
+	case sig := <-osCh:
+		log.Info("Received OS signal to shutdown", "signal", sig)
+	}
 	cancel()
-	waitGroup.Wait()
+	wg.Wait()
 }
